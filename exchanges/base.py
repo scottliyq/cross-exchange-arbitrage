@@ -69,9 +69,11 @@ class BaseExchangeClient(ABC):
     def round_to_tick(self, price) -> Decimal:
         price = Decimal(price)
 
-        tick = self.config.tick_size
+        tick = self.config.get('tick_size')
+        if tick is None:
+            return price
         # quantize forces price to be a multiple of tick
-        return price.quantize(tick, rounding=ROUND_HALF_UP)
+        return price.quantize(Decimal(str(tick)), rounding=ROUND_HALF_UP)
 
     @abstractmethod
     def _validate_config(self) -> None:

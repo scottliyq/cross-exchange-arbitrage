@@ -209,3 +209,5 @@ __marimo__/
 # logs
 logs/
 *.csv
+.grvt_aster_env
+.python-version
