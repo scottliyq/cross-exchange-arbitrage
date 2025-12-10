@@ -26,7 +26,7 @@ param = {
         "ORDER_QUANTITY": 0.01,
         "MAX_POSITION": 2,
         "LONG_GRVT_THRESHOLD": 2,
-        "SHORT_GRVT_THRESHOLD": 8
+        "SHORT_GRVT_THRESHOLD": 2
     }
 }
 
