@@ -116,9 +116,15 @@ class GrvtArb:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
 
-        # Create formatters
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+        # Create formatters with timestamp and line number
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+            datefmt='%H:%M:%S'
+        )
 
         file_handler.setFormatter(file_formatter)
         console_handler.setFormatter(console_formatter)
