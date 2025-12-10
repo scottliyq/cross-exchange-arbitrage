@@ -73,9 +73,10 @@ class OrderBookManager:
             self.aster_best_bid = None
             self.aster_best_ask = None
 
-    def update_aster_order_book(self, side: str, levels: list):
-        """Update Aster order book with new levels."""
-        for level in levels:
+    def update_aster_order_book(self, bids: list, asks: list):
+        """Update Aster order book with new bid and ask levels."""
+        # Update bids
+        for level in bids:
             # Handle different data structures - could be list [price, size] or dict {"price": ..., "size": ...}
             if isinstance(level, list) and len(level) >= 2:
                 price = Decimal(level[0])
@@ -84,14 +85,35 @@ class OrderBookManager:
                 price = Decimal(level.get("price", 0))
                 size = Decimal(level.get("size", 0))
             else:
-                self.logger.warning(f"⚠️ Unexpected level format: {level}")
+                self.logger.warning(f"⚠️ Unexpected bid level format: {level}")
                 continue
 
             if size > 0:
-                self.aster_order_book[side][price] = size
+                self.aster_order_book["bids"][price] = size
             else:
                 # Remove zero size orders
-                self.aster_order_book[side].pop(price, None)
+                self.aster_order_book["bids"].pop(price, None)
+
+        # Update asks
+        for level in asks:
+            if isinstance(level, list) and len(level) >= 2:
+                price = Decimal(level[0])
+                size = Decimal(level[1])
+            elif isinstance(level, dict):
+                price = Decimal(level.get("price", 0))
+                size = Decimal(level.get("size", 0))
+            else:
+                self.logger.warning(f"⚠️ Unexpected ask level format: {level}")
+                continue
+
+            if size > 0:
+                self.aster_order_book["asks"][price] = size
+            else:
+                # Remove zero size orders
+                self.aster_order_book["asks"].pop(price, None)
+
+        # Update BBO after processing all levels
+        self.update_aster_bbo()
 
     def validate_order_book_integrity(self) -> bool:
         """Validate order book integrity."""
@@ -124,3 +146,30 @@ class OrderBookManager:
     def get_aster_bbo(self) -> Tuple[Optional[Decimal], Optional[Decimal]]:
         """Get Aster best bid/ask prices."""
         return self.aster_best_bid, self.aster_best_ask
+
+    def update_aster_bbo(self):
+        """Update Aster best bid and ask prices."""
+        if self.aster_order_book["bids"]:
+            self.aster_best_bid = max(self.aster_order_book["bids"].keys())
+        else:
+            self.aster_best_bid = None
+
+        if self.aster_order_book["asks"]:
+            self.aster_best_ask = min(self.aster_order_book["asks"].keys())
+        else:
+            self.aster_best_ask = None
+
+        if not self.aster_order_book_ready and self.aster_best_bid and self.aster_best_ask:
+            self.aster_order_book_ready = True
+            self.logger.info(f"📊 Aster order book ready - Best bid: {self.aster_best_bid}, "
+                             f"Best ask: {self.aster_best_ask}")
+
+    def get_aster_mid_price(self) -> Decimal:
+        """Get mid price from Aster order book."""
+        best_bid, best_ask = self.get_aster_best_levels()
+
+        if best_bid is None or best_ask is None:
+            raise Exception("Cannot calculate mid price - missing order book data")
+
+        mid_price = (best_bid[0] + best_ask[0]) / Decimal('2')
+        return mid_price

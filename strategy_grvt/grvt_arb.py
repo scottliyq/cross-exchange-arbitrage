@@ -6,11 +6,13 @@ import os
 import sys
 import time
 import traceback
+import aiohttp
 from decimal import Decimal
 from typing import Tuple, Dict, Any
 
 from .data_logger import DataLogger
 from .order_book_manager import OrderBookManager
+from .websocket_manager import WebSocketManagerWrapper
 from .order_manager import OrderManager
 from .position_tracker import PositionTracker
 
@@ -43,12 +45,17 @@ class GrvtArb:
         self.long_grvt_threshold = long_grvt_threshold
         self.short_grvt_threshold = short_grvt_threshold
 
+        # Pushover configuration
+        self.pushover_user_key = os.getenv('PUSHOVER_USER_KEY')
+        self.pushover_api_token = os.getenv('PUSHOVER_API_TOKEN')
+
         # Setup logger
         self._setup_logger()
 
         # Initialize modules
         self.data_logger = DataLogger(exchange="grvt", ticker=ticker, logger=self.logger)
         self.order_book_manager = OrderBookManager(self.logger)
+        self.ws_manager = WebSocketManagerWrapper(self.order_book_manager, self.logger)
         self.order_manager = OrderManager(self.order_book_manager, self.logger)
 
         # Initialize clients (will be set later)
@@ -104,6 +111,9 @@ class GrvtArb:
 
     def _setup_callbacks(self):
         """Setup callback functions for order updates."""
+        self.ws_manager.set_callbacks(
+            on_grvt_order_update=self._handle_grvt_order_update
+        )
         self.order_manager.set_callbacks(
             on_order_filled=self._handle_aster_order_filled
         )
@@ -212,6 +222,38 @@ class GrvtArb:
             self.logger.error(f"Error handling GRVT order update: {e}")
             self.logger.error(f"Traceback: {traceback.format_exc()}")
 
+    async def send_pushover_alert(self, title: str, message: str, priority: int = 0):
+        """Send alert via Pushover.
+        
+        Args:
+            title: Alert title
+            message: Alert message
+            priority: Message priority (-2 to 2, default 0, 2 = emergency)
+        """
+        if not self.pushover_user_key or not self.pushover_api_token:
+            self.logger.warning("⚠️ Pushover credentials not configured, skipping alert")
+            return
+
+        try:
+            url = "https://api.pushover.net/1/messages.json"
+            data = {
+                "token": self.pushover_api_token,
+                "user": self.pushover_user_key,
+                "title": title,
+                "message": message,
+                "priority": priority
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data) as response:
+                    if response.status == 200:
+                        self.logger.info(f"✅ Pushover alert sent: {title}")
+                    else:
+                        error_text = await response.text()
+                        self.logger.error(f"❌ Failed to send Pushover alert: {response.status} - {error_text}")
+        except Exception as e:
+            self.logger.error(f"❌ Error sending Pushover alert: {e}")
+
     def shutdown(self, signum=None, frame=None):
         """Graceful shutdown handler."""
         # Prevent multiple shutdown calls
@@ -246,6 +288,14 @@ class GrvtArb:
             return
 
         self._cleanup_done = True
+
+        # Shutdown WebSocket manager
+        try:
+            if self.ws_manager:
+                self.ws_manager.shutdown()
+                self.logger.info("🔌 WebSocket manager shut down")
+        except Exception as e:
+            self.logger.error(f"Error shutting down WebSocket manager: {e}")
 
         # Disconnect GRVT client
         try:
@@ -368,7 +418,11 @@ class GrvtArb:
         self.order_manager.set_aster_config(
             self.aster_client, self.aster_contract_id, self.aster_tick_size)
 
-        # Connect to exchanges
+        # Configure WebSocket manager
+        self.ws_manager.set_grvt_config(self.grvt_client, self.grvt_contract_id)
+        self.ws_manager.set_aster_config(self.aster_client, self.aster_contract_id)
+
+        # Connect to GRVT and setup WebSocket for order book
         try:
             # Connect GRVT client
             await self.grvt_client.connect()
@@ -377,18 +431,50 @@ class GrvtArb:
             # Setup GRVT order update handler
             self.grvt_client.setup_order_update_handler(self._handle_grvt_order_update)
             self.logger.info("✅ GRVT order update handler setup")
-
-            # Connect Aster client
-            await self.aster_client.connect()
-            self.logger.info("✅ Aster client connected")
-
-            # Wait for connections to stabilize
-            await asyncio.sleep(3)
+            
+            # Setup GRVT WebSocket for order book updates
+            self.logger.info("📡 Setting up GRVT WebSocket for order book...")
+            await self.ws_manager.setup_grvt_websocket()
 
         except Exception as e:
-            self.logger.error(f"❌ Failed to connect to exchanges: {e}")
+            self.logger.error(f"❌ Failed to connect to GRVT: {e}")
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             return
+
+        # Setup Aster websocket
+        try:
+            await self.ws_manager.setup_aster_websocket()
+            self.logger.info("✅ Aster WebSocket task started")
+
+            # Wait for both order books to be ready
+            self.logger.info("⏳ Waiting for order book data...")
+            timeout = 15
+            start_time = time.time()
+            while (not self.order_book_manager.aster_order_book_ready or 
+                   not self.order_book_manager.grvt_order_book_ready) and not self.stop_flag:
+                if time.time() - start_time > timeout:
+                    self.logger.warning(
+                        f"⚠️ Timeout waiting for order book data after {timeout}s")
+                    self.logger.warning(
+                        f"Status - GRVT ready: {self.order_book_manager.grvt_order_book_ready}, "
+                        f"Aster ready: {self.order_book_manager.aster_order_book_ready}")
+                    break
+                await asyncio.sleep(0.5)
+
+            if self.order_book_manager.grvt_order_book_ready and self.order_book_manager.aster_order_book_ready:
+                self.logger.info("✅ Both order books ready")
+            else:
+                self.logger.warning("⚠️ Order books not ready - proceeding with available data")
+
+        except Exception as e:
+            self.logger.error(f"❌ Failed to setup Aster websocket: {e}")
+            return
+
+        # Connect Aster client for orders
+        await self.aster_client.connect()
+        self.logger.info("✅ Aster client connected")
+
+        await asyncio.sleep(3)
 
         # Get initial positions
         try:
@@ -407,56 +493,47 @@ class GrvtArb:
         # Main trading loop
         while not self.stop_flag:
             try:
-                # Fetch GRVT BBO prices
-                try:
-                    grvt_best_bid, grvt_best_ask = await asyncio.wait_for(
-                        self.order_manager.fetch_grvt_bbo_prices(),
-                        timeout=5.0
-                    )
-                except asyncio.TimeoutError:
-                    self.logger.warning("⚠️ Timeout fetching GRVT BBO prices")
-                    await asyncio.sleep(0.5)
-                    continue
-                except Exception as e:
-                    self.logger.error(f"⚠️ Error fetching GRVT BBO prices: {e}")
+                # Get BBO from order book manager (WebSocket data)
+                grvt_best_bid, grvt_best_ask = self.order_book_manager.get_grvt_bbo()
+                aster_best_bid, aster_best_ask = self.order_book_manager.get_aster_bbo()
+
+                # Check if we have valid order book data
+                if not grvt_best_bid or not grvt_best_ask:
+                    self.logger.debug("⚠️ GRVT order book not ready")
                     await asyncio.sleep(0.5)
                     continue
 
-                # Fetch Aster BBO prices
-                try:
-                    if not self.aster_client or not self.aster_contract_id:
-                        raise Exception("Aster client not initialized")
-                        
-                    aster_best_bid, aster_best_ask = await asyncio.wait_for(
-                        self.aster_client.fetch_bbo_prices(self.aster_contract_id),
-                        timeout=5.0
-                    )
-                except asyncio.TimeoutError:
-                    self.logger.warning("⚠️ Timeout fetching Aster BBO prices")
-                    await asyncio.sleep(0.5)
-                    continue
-                except Exception as e:
-                    self.logger.error(f"⚠️ Error fetching Aster BBO prices: {e}")
+                if not aster_best_bid or not aster_best_ask:
+                    self.logger.debug("⚠️ Aster order book not ready")
                     await asyncio.sleep(0.5)
                     continue
 
-                # Determine if we should trade
                 long_grvt = False
                 short_grvt = False
                 
                 if (aster_best_bid and grvt_best_bid and
                         aster_best_bid - grvt_best_bid > self.long_grvt_threshold):
                     long_grvt = True
+                    spread = aster_best_bid - grvt_best_bid
+                    self.logger.info(
+                        f"🟢 LONG GRVT Signal | Spread: {spread:.2f} | "
+                        f"Aster Bid: {aster_best_bid:.2f} | GRVT Bid: {grvt_best_bid:.2f} | "
+                        f"Threshold: {self.long_grvt_threshold}")
                 elif (grvt_best_ask and aster_best_ask and
                       grvt_best_ask - aster_best_ask > self.short_grvt_threshold):
                     short_grvt = True
+                    spread = grvt_best_ask - aster_best_ask
+                    self.logger.info(
+                        f"🔴 SHORT GRVT Signal | Spread: {spread:.2f} | "
+                        f"GRVT Ask: {grvt_best_ask:.2f} | Aster Ask: {aster_best_ask:.2f} | "
+                        f"Threshold: {self.short_grvt_threshold}")
 
-                # Log BBO data
+                # Log BBO data (using WebSocket order book data)
                 self.data_logger.log_bbo_to_csv(
-                    maker_bid=grvt_best_bid if grvt_best_bid else Decimal('0'),
-                    maker_ask=grvt_best_ask if grvt_best_ask else Decimal('0'),
-                    taker_bid=aster_best_bid if aster_best_bid else Decimal('0'),
-                    taker_ask=aster_best_ask if aster_best_ask else Decimal('0'),
+                    maker_bid=grvt_best_bid,
+                    maker_ask=grvt_best_ask,
+                    taker_bid=aster_best_bid,
+                    taker_ask=aster_best_ask,
                     long_maker=long_grvt,
                     short_maker=short_grvt,
                     long_maker_threshold=self.long_grvt_threshold,
@@ -521,8 +598,21 @@ class GrvtArb:
             f"Aster position: {self.position_tracker.aster_position}")
 
         if abs(self.position_tracker.get_net_position()) > self.order_quantity * 2:
-            self.logger.error(
-                f"❌ Position diff is too large: {self.position_tracker.get_net_position()}")
+            net_position = self.position_tracker.get_net_position()
+            self.logger.error(f"❌ Position diff is too large: {net_position}")
+            
+            # Send emergency Pushover alert for long trade
+            alert_title = f"🚨 {self.ticker} Position Imbalance (LONG)"
+            alert_message = (
+                f"Position difference exceeded threshold!\n\n"
+                f"Net Position: {net_position}\n"
+                f"GRVT: {self.position_tracker.grvt_position}\n"
+                f"Aster: {self.position_tracker.aster_position}\n"
+                f"Threshold: {self.order_quantity * 2}\n\n"
+                f"Bot is shutting down."
+            )
+            await self.send_pushover_alert(alert_title, alert_message, priority=2)
+            
             sys.exit(1)
 
         self.order_manager.order_execution_complete = False
@@ -593,8 +683,21 @@ class GrvtArb:
             f"Aster position: {self.position_tracker.aster_position}")
 
         if abs(self.position_tracker.get_net_position()) > self.order_quantity * 2:
-            self.logger.error(
-                f"❌ Position diff is too large: {self.position_tracker.get_net_position()}")
+            net_position = self.position_tracker.get_net_position()
+            self.logger.error(f"❌ Position diff is too large: {net_position}")
+            
+            # Send emergency Pushover alert for short trade
+            alert_title = f"🚨 {self.ticker} Position Imbalance (SHORT)"
+            alert_message = (
+                f"Position difference exceeded threshold!\n\n"
+                f"Net Position: {net_position}\n"
+                f"GRVT: {self.position_tracker.grvt_position}\n"
+                f"Aster: {self.position_tracker.aster_position}\n"
+                f"Threshold: {self.order_quantity * 2}\n\n"
+                f"Bot is shutting down."
+            )
+            await self.send_pushover_alert(alert_title, alert_message, priority=2)
+            
             sys.exit(1)
 
         self.order_manager.order_execution_complete = False

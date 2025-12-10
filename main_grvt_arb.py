@@ -1,5 +1,6 @@
 """Main entry point for GRVT-Aster arbitrage bot."""
 import asyncio
+import argparse
 import os
 import sys
 from decimal import Decimal
@@ -13,18 +14,49 @@ from strategy_grvt.grvt_arb import GrvtArb
 print("Modules loaded successfully!")
 sys.stdout.flush()
 
+# Parameter configuration for different symbols
+param = {
+    "BTC": {
+        "ORDER_QUANTITY": 0.001,
+        "MAX_POSITION": 0.05,
+        "LONG_GRVT_THRESHOLD": 40,
+        "SHORT_GRVT_THRESHOLD": 70
+    },
+    "ETH": {
+        "ORDER_QUANTITY": 0.01,
+        "MAX_POSITION": 2,
+        "LONG_GRVT_THRESHOLD": 2,
+        "SHORT_GRVT_THRESHOLD": 8
+    }
+}
 
 def main():
     """Main function to run the arbitrage bot."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='GRVT-Aster Arbitrage Bot')
+    parser.add_argument('--symbol', type=str, default='BTC', 
+                        help='Trading symbol (e.g., BTC, ETH). Default: BTC')
+    args = parser.parse_args()
+    
     # Load environment variables from .grvt_aster_env
     load_dotenv('.grvt_aster_env')
     
-    # Configuration
-    ticker = os.getenv('TICKER', 'BTC')
-    order_quantity = Decimal(os.getenv('ORDER_QUANTITY', '0.001'))
-    max_position = Decimal(os.getenv('MAX_POSITION', '0.01'))
-    long_grvt_threshold = Decimal(os.getenv('LONG_GRVT_THRESHOLD', '10'))
-    short_grvt_threshold = Decimal(os.getenv('SHORT_GRVT_THRESHOLD', '10'))
+    # Get symbol from command line argument
+    symbol = args.symbol.upper()
+    
+    # Check if symbol exists in param configuration
+    if symbol not in param:
+        print(f"❌ Error: Symbol '{symbol}' not found in configuration")
+        print(f"Available symbols: {', '.join(param.keys())}")
+        sys.exit(1)
+    
+    # Get configuration from param dictionary
+    config = param[symbol]
+    ticker = symbol
+    order_quantity = Decimal(str(config['ORDER_QUANTITY']))
+    max_position = Decimal(str(config['MAX_POSITION']))
+    long_grvt_threshold = Decimal(str(config['LONG_GRVT_THRESHOLD']))
+    short_grvt_threshold = Decimal(str(config['SHORT_GRVT_THRESHOLD']))
     
     print(f"Starting GRVT-Aster arbitrage bot")
     print(f"Ticker: {ticker}")
