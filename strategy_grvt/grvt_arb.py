@@ -150,19 +150,22 @@ class GrvtArb:
     def update_spread_statistics(self, long_spread: Decimal = None, short_spread: Decimal = None):
         """Update spread history with new spread value.
         
+        Only positive spreads (arbitrage opportunities) are recorded for statistical analysis.
+        This ensures thresholds are calculated based on actual profitable spread patterns.
+        
         Args:
             long_spread: Spread for long GRVT (Aster bid - GRVT bid)
             short_spread: Spread for short GRVT (GRVT ask - Aster ask)
         """
-        # Update long spread history
-        if long_spread is not None:
+        # Update long spread history - only record positive spreads
+        if long_spread is not None and long_spread > 0:
             self.long_spread_history.append(float(long_spread))
             # Keep only the most recent spreads within window size
             if len(self.long_spread_history) > self.spread_window_size:
                 self.long_spread_history.pop(0)
         
-        # Update short spread history
-        if short_spread is not None:
+        # Update short spread history - only record positive spreads
+        if short_spread is not None and short_spread > 0:
             self.short_spread_history.append(float(short_spread))
             # Keep only the most recent spreads within window size
             if len(self.short_spread_history) > self.spread_window_size:
@@ -234,6 +237,7 @@ class GrvtArb:
         
         Returns:
             Dynamic threshold = max(min_threshold, MA + z_score_multiplier * STD)
+            Always returns a positive value.
         """
         if len(spread_history) < self.min_samples_for_dynamic:
             # Not enough data, use minimum threshold
@@ -244,8 +248,9 @@ class GrvtArb:
         # Calculate dynamic threshold using Z-score method
         statistical_threshold = stats['moving_average'] + self.z_score_multiplier * stats['rolling_std']
         
+        # Ensure threshold is always positive
         # Use the maximum of min_threshold and statistical_threshold
-        dynamic_threshold = max(min_threshold, statistical_threshold)
+        dynamic_threshold = max(min_threshold, statistical_threshold, 0.1)
         
         return dynamic_threshold
 
@@ -813,32 +818,42 @@ class GrvtArb:
                     self.logger.error(f"Traceback: {traceback.format_exc()}")
                     await asyncio.sleep(1)
 
-    async def _execute_long_trade(self):
-        """Execute a long trade (buy on GRVT, sell on Aster)."""
-        if self.stop_flag or not self.position_tracker:
-            return
-
-        # Update positions
+    async def _update_positions(self) -> bool:
+        """Update positions from both exchanges.
+        
+        Returns:
+            True if successful, False if failed or stop_flag is set.
+        """
         try:
             self.position_tracker.grvt_position = await asyncio.wait_for(
                 self.position_tracker.get_grvt_position(),
                 timeout=3.0
             )
             if self.stop_flag:
-                return
+                return False
             self.position_tracker.aster_position = await asyncio.wait_for(
                 self.position_tracker.get_aster_position(),
                 timeout=3.0
             )
+            return True
         except asyncio.TimeoutError:
             if self.stop_flag:
-                return
+                return False
             self.logger.warning("⚠️ Timeout getting positions")
-            return
+            return False
         except Exception as e:
             if self.stop_flag:
-                return
+                return False
             self.logger.error(f"⚠️ Error getting positions: {e}")
+            return False
+
+    async def _execute_long_trade(self):
+        """Execute a long trade (buy on GRVT, sell on Aster)."""
+        if self.stop_flag or not self.position_tracker:
+            return
+
+        # Update positions before trading
+        if not await self._update_positions():
             return
 
         if self.stop_flag:
@@ -903,27 +918,8 @@ class GrvtArb:
         if self.stop_flag or not self.position_tracker:
             return
 
-        # Update positions
-        try:
-            self.position_tracker.grvt_position = await asyncio.wait_for(
-                self.position_tracker.get_grvt_position(),
-                timeout=3.0
-            )
-            if self.stop_flag:
-                return
-            self.position_tracker.aster_position = await asyncio.wait_for(
-                self.position_tracker.get_aster_position(),
-                timeout=3.0
-            )
-        except asyncio.TimeoutError:
-            if self.stop_flag:
-                return
-            self.logger.warning("⚠️ Timeout getting positions")
-            return
-        except Exception as e:
-            if self.stop_flag:
-                return
-            self.logger.error(f"⚠️ Error getting positions: {e}")
+        # Update positions before trading
+        if not await self._update_positions():
             return
 
         if self.stop_flag:
