@@ -19,8 +19,8 @@ param = {
     "BTC": {
         "ORDER_QUANTITY": 0.001,
         "MAX_POSITION": 0.05,
-        "LONG_GRVT_THRESHOLD": 40,
-        "SHORT_GRVT_THRESHOLD": 70
+        "LONG_GRVT_THRESHOLD": 30,
+        "SHORT_GRVT_THRESHOLD": 30
     },
     "ETH": {
         "ORDER_QUANTITY": 0.01,
