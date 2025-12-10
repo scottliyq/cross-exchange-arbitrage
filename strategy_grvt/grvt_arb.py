@@ -55,8 +55,11 @@ class GrvtArb:
         self.short_spread_history = []  # Store historical short spreads (GRVT ask - Aster ask)
         self.spread_window_size = 100  # Number of spreads to keep for MA/STD calculation
         
+        # self.z_score_multiplier = 1.5  # 激进：更多交易机会
+        # self.z_score_multiplier = 2.0  # 中性：平衡（当前默认）
+        # self.z_score_multiplier = 2.5  # 保守：只捕捉大机会
         # Dynamic threshold calculation parameters
-        self.z_score_multiplier = 2.0  # Z-score threshold for dynamic calculation
+        self.z_score_multiplier = 1.5  # Z-score threshold for dynamic calculation
         self.threshold_update_interval = 5.0  # Update thresholds every N seconds
         self.min_samples_for_dynamic = 50  # Minimum samples before using dynamic thresholds
         self.threshold_calculation_task = None  # Task for threshold calculation coroutine
@@ -332,7 +335,7 @@ class GrvtArb:
     def _handle_aster_order_filled(self, order_data: dict):
         """Handle Aster order fill."""
         try:
-            side = order_data.get("side", "")
+            side = order_data.get("side", "") 
             filled_amount = order_data.get("filled_base_amount", 0)
             avg_price = order_data.get("avg_filled_price", 0)
             
