@@ -740,8 +740,10 @@ class GrvtArb:
         # Main trading loop
         while not self.stop_flag:
             try:
+                await asyncio.sleep(2)
                 # Update positions at the beginning of each loop iteration
                 if not await self._update_positions():
+                    await asyncio.sleep(0.5)
                     continue
                 
                 if self.stop_flag:
