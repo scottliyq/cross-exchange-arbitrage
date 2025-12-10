@@ -107,6 +107,10 @@ class GrvtArb:
         logging.getLogger('requests').setLevel(logging.WARNING)
         logging.getLogger('websockets').setLevel(logging.WARNING)
         logging.getLogger('aiohttp').setLevel(logging.WARNING)
+        
+        # Suppress GRVT SDK WebSocket connection errors (we handle reconnection ourselves)
+        logging.getLogger('pysdk.grvt_ccxt_logging_selector').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk.grvt_ccxt_ws').setLevel(logging.WARNING)
 
         # Create file handler
         file_handler = logging.FileHandler(self.log_filename)

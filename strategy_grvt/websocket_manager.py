@@ -160,6 +160,8 @@ class WebSocketManagerWrapper:
         """Monitor GRVT WebSocket connection and reconnect if needed."""
         heartbeat_timeout = 60  # 60 seconds without messages triggers reconnect
         check_interval = 10  # Check every 10 seconds
+        max_reconnect_attempts = 5  # Maximum consecutive reconnect attempts
+        consecutive_failures = 0
         
         while not self.stop_flag:
             try:
@@ -173,22 +175,44 @@ class WebSocketManagerWrapper:
                 
                 if time_since_last_message > heartbeat_timeout:
                     self.grvt_reconnect_count += 1
+                    consecutive_failures += 1
+                    
                     self.logger.warning(
                         f"⚠️ GRVT WebSocket: No messages for {time_since_last_message:.1f}s. "
-                        f"Reconnecting... (attempt #{self.grvt_reconnect_count})"
+                        f"Reconnecting... (attempt #{self.grvt_reconnect_count}, "
+                        f"consecutive failures: {consecutive_failures})"
                     )
                     
                     # Mark order book as not ready during reconnection
                     self.order_book_manager.grvt_order_book_ready = False
                     
+                    # Check if too many consecutive failures
+                    if consecutive_failures >= max_reconnect_attempts:
+                        self.logger.error(
+                            f"❌ Too many consecutive reconnection failures ({consecutive_failures}). "
+                            "Please check network and exchange status."
+                        )
+                        # Wait longer before next attempt
+                        await asyncio.sleep(30)
+                        consecutive_failures = 0  # Reset counter
+                        continue
+                    
                     # Attempt to reconnect
                     try:
                         await self._reconnect_grvt_websocket()
                         self.logger.info("✅ GRVT WebSocket reconnected successfully")
+                        consecutive_failures = 0  # Reset on success
                     except Exception as e:
                         self.logger.error(f"❌ Failed to reconnect GRVT WebSocket: {e}")
-                        # Wait before next attempt
-                        await asyncio.sleep(5)
+                        self.logger.error(traceback.format_exc())
+                        # Wait before next attempt (exponential backoff)
+                        wait_time = min(5 * consecutive_failures, 30)
+                        self.logger.info(f"⏳ Waiting {wait_time}s before next reconnection attempt...")
+                        await asyncio.sleep(wait_time)
+                else:
+                    # Reset consecutive failures if receiving messages normally
+                    if consecutive_failures > 0:
+                        consecutive_failures = 0
                         
             except asyncio.CancelledError:
                 self.logger.info("🔌 GRVT WebSocket monitor task cancelled")
@@ -203,6 +227,13 @@ class WebSocketManagerWrapper:
         try:
             self.logger.info("🔄 Attempting to reconnect GRVT WebSocket...")
             
+            # Clear order book before reconnection
+            self.order_book_manager.grvt_order_book['bids'].clear()
+            self.order_book_manager.grvt_order_book['asks'].clear()
+            self.order_book_manager.grvt_best_bid = None
+            self.order_book_manager.grvt_best_ask = None
+            self.logger.info("🧹 Cleared GRVT order book before reconnection")
+            
             # Try to disconnect first (if possible)
             try:
                 if hasattr(self.grvt_client, '_ws_client') and self.grvt_client._ws_client:
@@ -211,13 +242,14 @@ class WebSocketManagerWrapper:
                     from pysdk.grvt_ccxt_env import GrvtWSEndpointType
                     try:
                         await ws_client.unsubscribe(
-                            stream="book.s",
+                            stream="book.d",
                             ws_end_point_type=GrvtWSEndpointType.MARKET_DATA_RPC_FULL,
                             params={"instrument": self.grvt_contract_id}
                         )
+                        self.logger.info("✅ Unsubscribed from previous book.d stream")
                         await asyncio.sleep(1)
-                    except:
-                        pass  # Ignore unsubscribe errors
+                    except Exception as unsub_err:
+                        self.logger.debug(f"Unsubscribe error (expected if connection lost): {unsub_err}")
             except Exception as e:
                 self.logger.debug(f"Cleanup before reconnect: {e}")
             
