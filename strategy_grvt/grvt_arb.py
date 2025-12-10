@@ -740,6 +740,13 @@ class GrvtArb:
         # Main trading loop
         while not self.stop_flag:
             try:
+                # Update positions at the beginning of each loop iteration
+                if not await self._update_positions():
+                    continue
+                
+                if self.stop_flag:
+                    break
+                
                 # Get BBO from order book manager (WebSocket data)
                 grvt_best_bid, grvt_best_ask = self.order_book_manager.get_grvt_bbo()
                 aster_best_bid, aster_best_ask = self.order_book_manager.get_aster_bbo()
@@ -852,13 +859,6 @@ class GrvtArb:
         if self.stop_flag or not self.position_tracker:
             return
 
-        # Update positions before trading
-        if not await self._update_positions():
-            return
-
-        if self.stop_flag:
-            return
-
         self.logger.info(
             f"GRVT position: {self.position_tracker.grvt_position} | "
             f"Aster position: {self.position_tracker.aster_position}")
@@ -916,13 +916,6 @@ class GrvtArb:
     async def _execute_short_trade(self):
         """Execute a short trade (sell on GRVT, buy on Aster)."""
         if self.stop_flag or not self.position_tracker:
-            return
-
-        # Update positions before trading
-        if not await self._update_positions():
-            return
-
-        if self.stop_flag:
             return
 
         self.logger.info(
