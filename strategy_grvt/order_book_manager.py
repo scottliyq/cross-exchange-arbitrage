@@ -27,30 +27,41 @@ class OrderBookManager:
 
     # GRVT order book methods
     def update_grvt_order_book(self, bids: list, asks: list):
-        """Update GRVT order book with new levels."""
-        # Update bids
+        """Update GRVT order book with new levels.
+        
+        Note: GRVT 'book.d' stream sends incremental updates (deltas).
+        Size = 0 means remove that price level, size > 0 means add/update.
+        """
+        # Update bids (incremental mode)
         for bid in bids:
             price = Decimal(bid['price'])
             size = Decimal(bid['size'])
             if size > 0:
                 self.grvt_order_book['bids'][price] = size
             else:
+                # Size = 0 means remove this price level
                 self.grvt_order_book['bids'].pop(price, None)
 
-        # Update asks
+        # Update asks (incremental mode)
         for ask in asks:
             price = Decimal(ask['price'])
             size = Decimal(ask['size'])
             if size > 0:
                 self.grvt_order_book['asks'][price] = size
             else:
+                # Size = 0 means remove this price level
                 self.grvt_order_book['asks'].pop(price, None)
 
         # Update best bid and ask
         if self.grvt_order_book['bids']:
             self.grvt_best_bid = max(self.grvt_order_book['bids'].keys())
+        else:
+            self.grvt_best_bid = None
+            
         if self.grvt_order_book['asks']:
             self.grvt_best_ask = min(self.grvt_order_book['asks'].keys())
+        else:
+            self.grvt_best_ask = None
 
         if not self.grvt_order_book_ready:
             self.grvt_order_book_ready = True

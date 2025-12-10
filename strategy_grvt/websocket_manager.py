@@ -134,15 +134,16 @@ class WebSocketManagerWrapper:
             # Subscribe directly - SDK will auto-connect the needed endpoint
             # Don't call initialize() as it tries to connect ALL endpoints (mdg, tdg, etc.)
             # which causes timeouts for endpoints we don't need
-            self.logger.info(f"📡 Subscribing to GRVT order book stream...")
+            # Use book.d for delta/incremental updates instead of book.s (snapshot)
+            self.logger.info(f"📡 Subscribing to GRVT order book stream (delta mode)...")
             await ws_client.subscribe(
-                stream="book.s",
+                stream="book.d",
                 ws_end_point_type=GrvtWSEndpointType.MARKET_DATA_RPC_FULL,
                 callback=self.handle_grvt_order_book_update,
                 params={"instrument": self.grvt_contract_id}
             )
             
-            self.logger.info(f"✅ Subscribed to GRVT order book for {self.grvt_contract_id}")
+            self.logger.info(f"✅ Subscribed to GRVT order book (delta mode) for {self.grvt_contract_id}")
             
             # Initialize last message time
             self.grvt_last_message_time = time.time()
