@@ -17,14 +17,14 @@ sys.stdout.flush()
 # Parameter configuration for different symbols
 param = {
     "BTC": {
-        "ORDER_QUANTITY": 0.001,
-        "MAX_POSITION": 0.05,
+        "ORDER_QUANTITY": 0.004,
+        "MAX_POSITION": 0.12,
         "LONG_GRVT_THRESHOLD": 30,
         "SHORT_GRVT_THRESHOLD": 30
     },
     "ETH": {
-        "ORDER_QUANTITY": 0.01,
-        "MAX_POSITION": 2,
+        "ORDER_QUANTITY": 0.1,
+        "MAX_POSITION": 3,
         "LONG_GRVT_THRESHOLD": 2,
         "SHORT_GRVT_THRESHOLD": 2
     }
