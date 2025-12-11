@@ -20,13 +20,13 @@ param = {
         "ORDER_QUANTITY": 0.004,
         "MAX_POSITION": 0.12,
         "LONG_GRVT_THRESHOLD": 30,
-        "SHORT_GRVT_THRESHOLD": 30
+        "SHORT_GRVT_THRESHOLD": 35
     },
     "ETH": {
         "ORDER_QUANTITY": 0.1,
         "MAX_POSITION": 3,
         "LONG_GRVT_THRESHOLD": 2,
-        "SHORT_GRVT_THRESHOLD": 2
+        "SHORT_GRVT_THRESHOLD": 3
     }
 }
 
