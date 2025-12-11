@@ -740,14 +740,7 @@ class GrvtArb:
         # Main trading loop
         while not self.stop_flag:
             try:
-                await asyncio.sleep(1)
-                # Update positions at the beginning of each loop iteration
-                if not await self._update_positions():
-                    await asyncio.sleep(0.5)
-                    continue
-                
-                if self.stop_flag:
-                    break
+                # await asyncio.sleep(1)
                 
                 # Get BBO from order book manager (WebSocket data)
                 grvt_best_bid, grvt_best_ask = self.order_book_manager.get_grvt_bbo()
@@ -805,8 +798,13 @@ class GrvtArb:
                     short_maker_threshold=self.short_grvt_threshold
                 )
 
-                if self.stop_flag:
-                    break
+                if long_grvt or short_grvt:
+                    # Update positions at the beginning of each loop iteration
+                    if not await self._update_positions():
+                        continue
+                    
+                    if self.stop_flag:
+                        break
 
                 # Execute trades
                 if self.position_tracker:
