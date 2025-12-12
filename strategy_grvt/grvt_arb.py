@@ -33,7 +33,8 @@ class GrvtArb:
     def __init__(self, ticker: str, order_quantity: Decimal,
                  fill_timeout: int = 5, max_position: Decimal = Decimal('0'),
                  long_grvt_threshold: Decimal = Decimal('10'),
-                 short_grvt_threshold: Decimal = Decimal('10')):
+                 short_grvt_threshold: Decimal = Decimal('10'),
+                 z_score_multiplier: float = 1.5):
         """Initialize the arbitrage trading bot."""
         self.ticker = ticker
         self.order_quantity = order_quantity
@@ -59,7 +60,7 @@ class GrvtArb:
         # self.z_score_multiplier = 2.0  # 中性：平衡（当前默认）
         # self.z_score_multiplier = 2.5  # 保守：只捕捉大机会
         # Dynamic threshold calculation parameters
-        self.z_score_multiplier = 1.5  # Z-score threshold for dynamic calculation
+        self.z_score_multiplier = z_score_multiplier  # Z-score threshold for dynamic calculation
         self.threshold_update_interval = 5.0  # Update thresholds every N seconds
         self.min_samples_for_dynamic = 50  # Minimum samples before using dynamic thresholds
         self.threshold_calculation_task = None  # Task for threshold calculation coroutine
