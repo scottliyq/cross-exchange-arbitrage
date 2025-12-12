@@ -212,3 +212,4 @@ logs/
 .grvt_aster_env
 .python-version
 nohup.out
+uv.lock

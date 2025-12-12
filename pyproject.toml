@@ -11,4 +11,5 @@ dependencies = [
     "pytz>=2024.1",
     "tenacity>=8.2.3",
     "python-dotenv>=1.0.0",
+    "supabase>=2.0.0",
 ]
