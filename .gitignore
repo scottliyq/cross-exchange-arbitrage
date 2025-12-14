@@ -213,3 +213,4 @@ logs/
 .python-version
 nohup.out
 uv.lock
+.DS_Store
