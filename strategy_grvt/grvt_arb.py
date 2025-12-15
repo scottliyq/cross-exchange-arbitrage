@@ -749,7 +749,7 @@ class GrvtArb:
                 if (aster_best_bid and grvt_best_bid and
                         aster_best_bid - grvt_best_bid > self.long_grvt_threshold):
                     long_grvt = True
-                    self.logger.info(
+                    self.logger.debug(
                         f"🟢 LONG GRVT Signal | "
                         f"Aster Bid: {aster_best_bid:.6f} | GRVT Bid: {grvt_best_bid:.6f} | "
                         f"Threshold: {self.long_grvt_threshold}")
@@ -757,7 +757,7 @@ class GrvtArb:
                 elif (grvt_best_ask and aster_best_ask and
                       grvt_best_ask - aster_best_ask > self.short_grvt_threshold):
                     short_grvt = True
-                    self.logger.info(
+                    self.logger.debug(
                         f"🔴 SHORT GRVT Signal | "
                         f"GRVT Ask: {grvt_best_ask:.6f} | Aster Ask: {aster_best_ask:.6f} | "
                         f"Threshold: {self.short_grvt_threshold}")
