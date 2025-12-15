@@ -18,6 +18,7 @@ from .position_tracker import PositionTracker
 
 from exchanges.grvt import GrvtClient
 from exchanges.aster import AsterClient
+from helpers.pushover_bot import PushoverBot
 
 
 class Config:
@@ -65,12 +66,11 @@ class GrvtArb:
         self.min_samples_for_dynamic = 50  # Minimum samples before using dynamic thresholds
         self.threshold_calculation_task = None  # Task for threshold calculation coroutine
 
-        # Pushover configuration
-        self.pushover_user_key = os.getenv('PUSHOVER_USER_KEY')
-        self.pushover_api_token = os.getenv('PUSHOVER_API_TOKEN')
-
         # Setup logger
         self._setup_logger()
+        
+        # Pushover bot for notifications
+        self.pushover_bot = PushoverBot(logger=self.logger)
 
         # Initialize modules
         self.data_logger = DataLogger(exchange="grvt", ticker=ticker, logger=self.logger)
@@ -452,37 +452,7 @@ class GrvtArb:
             self.logger.error(f"Error handling GRVT order update: {e}")
             self.logger.error(f"Traceback: {traceback.format_exc()}")
 
-    async def send_pushover_alert(self, title: str, message: str, priority: int = 0):
-        """Send alert via Pushover.
-        
-        Args:
-            title: Alert title
-            message: Alert message
-            priority: Message priority (-2 to 2, default 0, 2 = emergency)
-        """
-        if not self.pushover_user_key or not self.pushover_api_token:
-            self.logger.warning("⚠️ Pushover credentials not configured, skipping alert")
-            return
 
-        try:
-            url = "https://api.pushover.net/1/messages.json"
-            data = {
-                "token": self.pushover_api_token,
-                "user": self.pushover_user_key,
-                "title": title,
-                "message": message,
-                "priority": priority
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=data) as response:
-                    if response.status == 200:
-                        self.logger.info(f"✅ Pushover alert sent: {title}")
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"❌ Failed to send Pushover alert: {response.status} - {error_text}")
-        except Exception as e:
-            self.logger.error(f"❌ Error sending Pushover alert: {e}")
 
     def shutdown(self, signum=None, frame=None):
         """Graceful shutdown handler."""
@@ -880,7 +850,7 @@ class GrvtArb:
                 f"Threshold: {self.order_quantity * 2}\n\n"
                 f"Bot is shutting down."
             )
-            await self.send_pushover_alert(alert_title, alert_message, priority=2)
+            await self.pushover_bot.send_alert(alert_title, alert_message, priority=2)
             
             sys.exit(1)
 
@@ -939,7 +909,7 @@ class GrvtArb:
                 f"Threshold: {self.order_quantity * 2}\n\n"
                 f"Bot is shutting down."
             )
-            await self.send_pushover_alert(alert_title, alert_message, priority=2)
+            await self.pushover_bot.send_alert(alert_title, alert_message, priority=2)
             
             sys.exit(1)
 
