@@ -812,9 +812,11 @@ class GrvtArb:
                     if (self.position_tracker.get_current_grvt_position() < self.max_position and
                             long_grvt):
                         await self._execute_long_trade()
+                        await asyncio.sleep(2)
                     elif (self.position_tracker.get_current_grvt_position() > -1 * self.max_position and
                           short_grvt):
                         await self._execute_short_trade()
+                        await asyncio.sleep(2)
                     else:
                         await asyncio.sleep(0.05)
                 else:
