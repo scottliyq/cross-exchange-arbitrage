@@ -71,6 +71,10 @@ class GrvtArb:
         
         # Pushover bot for notifications
         self.pushover_bot = PushoverBot(logger=self.logger)
+        
+        # Position query rate limiting
+        self.position_cache_interval = 3.0  # Only query positions every N seconds
+        self.last_position_update = 0.0  # Timestamp of last position query
 
         # Initialize modules
         self.data_logger = DataLogger(exchange="grvt", ticker=ticker, logger=self.logger)
@@ -694,6 +698,7 @@ class GrvtArb:
                 
             self.position_tracker.grvt_position = await self.position_tracker.get_grvt_position()
             self.position_tracker.aster_position = await self.position_tracker.get_aster_position()
+            self.last_position_update = time.time()  # Initialize cache timestamp
             self.logger.info(
                 f"Initial positions - GRVT: {self.position_tracker.grvt_position}, "
                 f"Aster: {self.position_tracker.aster_position}")
@@ -746,7 +751,7 @@ class GrvtArb:
                     long_grvt = True
                     self.logger.info(
                         f"🟢 LONG GRVT Signal | "
-                        f"Aster Bid: {aster_best_bid:.2f} | GRVT Bid: {grvt_best_bid:.2f} | "
+                        f"Aster Bid: {aster_best_bid:.6f} | GRVT Bid: {grvt_best_bid:.6f} | "
                         f"Threshold: {self.long_grvt_threshold}")
                     
                 elif (grvt_best_ask and aster_best_ask and
@@ -754,7 +759,7 @@ class GrvtArb:
                     short_grvt = True
                     self.logger.info(
                         f"🔴 SHORT GRVT Signal | "
-                        f"GRVT Ask: {grvt_best_ask:.2f} | Aster Ask: {aster_best_ask:.2f} | "
+                        f"GRVT Ask: {grvt_best_ask:.6f} | Aster Ask: {aster_best_ask:.6f} | "
                         f"Threshold: {self.short_grvt_threshold}")
 
                 # Log BBO data (using WebSocket order book data)
@@ -798,12 +803,23 @@ class GrvtArb:
                     self.logger.error(f"Traceback: {traceback.format_exc()}")
                     await asyncio.sleep(1)
 
-    async def _update_positions(self) -> bool:
+    async def _update_positions(self, force: bool = False) -> bool:
         """Update positions from both exchanges.
+        
+        Args:
+            force: Force update even if cache is still valid
         
         Returns:
             True if successful, False if failed or stop_flag is set.
         """
+        current_time = time.time()
+        
+        # Check if cache is still valid (unless forced)
+        if not force and (current_time - self.last_position_update) < self.position_cache_interval:
+            self.logger.debug(
+                f"📊 Using cached positions (age: {current_time - self.last_position_update:.1f}s)")
+            return True
+        
         try:
             self.position_tracker.grvt_position = await asyncio.wait_for(
                 self.position_tracker.get_grvt_position(),
@@ -815,6 +831,12 @@ class GrvtArb:
                 self.position_tracker.get_aster_position(),
                 timeout=3.0
             )
+            
+            # Update cache timestamp
+            self.last_position_update = current_time
+            self.logger.debug(
+                f"📊 Positions updated from API - GRVT: {self.position_tracker.grvt_position}, "
+                f"Aster: {self.position_tracker.aster_position}")
             return True
         except asyncio.TimeoutError:
             if self.stop_flag:
