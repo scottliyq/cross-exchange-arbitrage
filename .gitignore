@@ -211,3 +211,6 @@ logs/
 *.csv
 .grvt_aster_env
 .python-version
+nohup.out
+uv.lock
+.DS_Store

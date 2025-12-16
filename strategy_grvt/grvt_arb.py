@@ -18,6 +18,7 @@ from .position_tracker import PositionTracker
 
 from exchanges.grvt import GrvtClient
 from exchanges.aster import AsterClient
+from helpers.pushover_bot import PushoverBot
 
 
 class Config:
@@ -33,7 +34,8 @@ class GrvtArb:
     def __init__(self, ticker: str, order_quantity: Decimal,
                  fill_timeout: int = 5, max_position: Decimal = Decimal('0'),
                  long_grvt_threshold: Decimal = Decimal('10'),
-                 short_grvt_threshold: Decimal = Decimal('10')):
+                 short_grvt_threshold: Decimal = Decimal('10'),
+                 z_score_multiplier: float = 1.5):
         """Initialize the arbitrage trading bot."""
         self.ticker = ticker
         self.order_quantity = order_quantity
@@ -42,15 +44,37 @@ class GrvtArb:
         self.stop_flag = False
         self._cleanup_done = False
 
+        # Static thresholds (used as minimum values)
+        self.min_long_grvt_threshold = long_grvt_threshold
+        self.min_short_grvt_threshold = short_grvt_threshold
+        
+        # Dynamic thresholds (updated by threshold calculation coroutine)
         self.long_grvt_threshold = long_grvt_threshold
         self.short_grvt_threshold = short_grvt_threshold
 
-        # Pushover configuration
-        self.pushover_user_key = os.getenv('PUSHOVER_USER_KEY')
-        self.pushover_api_token = os.getenv('PUSHOVER_API_TOKEN')
+        # Spread statistics tracking - separate histories for long and short
+        self.long_spread_history = []  # Store historical long spreads (Aster bid - GRVT bid)
+        self.short_spread_history = []  # Store historical short spreads (GRVT ask - Aster ask)
+        self.spread_window_size = 100  # Number of spreads to keep for MA/STD calculation
+        
+        # self.z_score_multiplier = 1.5  # 激进：更多交易机会
+        # self.z_score_multiplier = 2.0  # 中性：平衡（当前默认）
+        # self.z_score_multiplier = 2.5  # 保守：只捕捉大机会
+        # Dynamic threshold calculation parameters
+        self.z_score_multiplier = z_score_multiplier  # Z-score threshold for dynamic calculation
+        self.threshold_update_interval = 5.0  # Update thresholds every N seconds
+        self.min_samples_for_dynamic = 50  # Minimum samples before using dynamic thresholds
+        self.threshold_calculation_task = None  # Task for threshold calculation coroutine
 
         # Setup logger
         self._setup_logger()
+        
+        # Pushover bot for notifications
+        self.pushover_bot = PushoverBot(logger=self.logger)
+        
+        # Position query rate limiting
+        self.position_cache_interval = 3.0  # Only query positions every N seconds
+        self.last_position_update = 0.0  # Timestamp of last position query
 
         # Initialize modules
         self.data_logger = DataLogger(exchange="grvt", ticker=ticker, logger=self.logger)
@@ -88,6 +112,10 @@ class GrvtArb:
         logging.getLogger('requests').setLevel(logging.WARNING)
         logging.getLogger('websockets').setLevel(logging.WARNING)
         logging.getLogger('aiohttp').setLevel(logging.WARNING)
+        
+        # Suppress GRVT SDK WebSocket connection errors (we handle reconnection ourselves)
+        logging.getLogger('pysdk.grvt_ccxt_logging_selector').setLevel(logging.CRITICAL)
+        logging.getLogger('pysdk.grvt_ccxt_ws').setLevel(logging.WARNING)
 
         # Create file handler
         file_handler = logging.FileHandler(self.log_filename)
@@ -97,9 +125,15 @@ class GrvtArb:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
 
-        # Create formatters
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+        # Create formatters with timestamp and line number
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+            datefmt='%H:%M:%S'
+        )
 
         file_handler.setFormatter(file_formatter)
         console_handler.setFormatter(console_formatter)
@@ -118,10 +152,210 @@ class GrvtArb:
             on_order_filled=self._handle_aster_order_filled
         )
 
+    def update_spread_statistics(self, long_spread: Decimal = None, short_spread: Decimal = None):
+        """Update spread history with new spread value.
+        
+        Only positive spreads (arbitrage opportunities) are recorded for statistical analysis.
+        This ensures thresholds are calculated based on actual profitable spread patterns.
+        
+        Args:
+            long_spread: Spread for long GRVT (Aster bid - GRVT bid)
+            short_spread: Spread for short GRVT (GRVT ask - Aster ask)
+        """
+        # Update long spread history - only record positive spreads
+        if long_spread is not None and long_spread > 0:
+            self.long_spread_history.append(float(long_spread))
+            # Keep only the most recent spreads within window size
+            if len(self.long_spread_history) > self.spread_window_size:
+                self.long_spread_history.pop(0)
+        
+        # Update short spread history - only record positive spreads
+        if short_spread is not None and short_spread > 0:
+            self.short_spread_history.append(float(short_spread))
+            # Keep only the most recent spreads within window size
+            if len(self.short_spread_history) > self.spread_window_size:
+                self.short_spread_history.pop(0)
+
+    def get_spread_statistics(self, spread_history: list, window: int = None) -> Dict[str, float]:
+        """Get comprehensive spread statistics for a given spread history.
+        
+        Args:
+            spread_history: List of spread values to calculate statistics from
+            window: Number of recent spreads to include. If None, uses all available spreads.
+        
+        Returns:
+            Dictionary containing:
+                - 'moving_average': Moving average of spread
+                - 'rolling_std': Rolling standard deviation
+                - 'count': Number of spreads in calculation
+                - 'min': Minimum spread in window
+                - 'max': Maximum spread in window
+        """
+        if not spread_history:
+            return {
+                'moving_average': 0.0,
+                'rolling_std': 0.0,
+                'count': 0,
+                'min': 0.0,
+                'max': 0.0
+            }
+        
+        # Use specified window or all available data
+        if window is None:
+            window = len(spread_history)
+        
+        recent_spreads = spread_history[-min(window, len(spread_history)):]
+        
+        if not recent_spreads:
+            return {
+                'moving_average': 0.0,
+                'rolling_std': 0.0,
+                'count': 0,
+                'min': 0.0,
+                'max': 0.0
+            }
+        
+        # Calculate mean
+        mean = sum(recent_spreads) / len(recent_spreads)
+        
+        # Calculate standard deviation
+        if len(recent_spreads) >= 2:
+            variance = sum((x - mean) ** 2 for x in recent_spreads) / len(recent_spreads)
+            std = variance ** 0.5
+        else:
+            std = 0.0
+        
+        return {
+            'moving_average': mean,
+            'rolling_std': std,
+            'count': len(recent_spreads),
+            'min': min(recent_spreads),
+            'max': max(recent_spreads)
+        }
+
+    def calculate_dynamic_threshold(self, spread_history: list, min_threshold: float) -> float:
+        """Calculate dynamic threshold based on Z-score method.
+        
+        Args:
+            spread_history: List of spread values to calculate threshold from
+            min_threshold: Minimum threshold value (from config)
+        
+        Returns:
+            Dynamic threshold = max(min_threshold, MA + z_score_multiplier * STD)
+            Always returns a positive value.
+        """
+        if len(spread_history) < self.min_samples_for_dynamic:
+            # Not enough data, use minimum threshold
+            return min_threshold
+        
+        stats = self.get_spread_statistics(spread_history)
+        
+        # Calculate dynamic threshold using Z-score method
+        statistical_threshold = stats['moving_average'] + self.z_score_multiplier * stats['rolling_std']
+        
+        # Ensure threshold is always positive
+        # Use the maximum of min_threshold and statistical_threshold
+        dynamic_threshold = max(min_threshold, statistical_threshold, 0.1)
+        
+        return dynamic_threshold
+
+    async def _threshold_calculation_loop(self):
+        """Independent coroutine for calculating dynamic thresholds and logging spread statistics."""
+        self.logger.info(f"📊 Starting dynamic threshold calculation coroutine (update interval: {self.threshold_update_interval}s)")
+        
+        while not self.stop_flag:
+            try:
+                # Get long spread statistics
+                long_stats = self.get_spread_statistics(self.long_spread_history)
+                
+                # Log long spread statistics to CSV if we have data
+                if long_stats['count'] > 0:
+                    recent_long_spread = self.long_spread_history[-1] if self.long_spread_history else 0.0
+                    
+                    self.data_logger.log_spread_stats_to_csv(
+                        spread=recent_long_spread,
+                        spread_type='long',
+                        moving_average=long_stats['moving_average'],
+                        rolling_std=long_stats['rolling_std'],
+                        count=long_stats['count'],
+                        min_spread=long_stats['min'],
+                        max_spread=long_stats['max']
+                    )
+                    
+                    self.logger.debug(
+                        f"📊 LONG spread stats logged: count={long_stats['count']}, "
+                        f"MA={long_stats['moving_average']:.2f}, STD={long_stats['rolling_std']:.2f}")
+                else:
+                    self.logger.debug(f"⏳ Waiting for LONG spread data (history size: {len(self.long_spread_history)})")
+                
+                # Get short spread statistics
+                short_stats = self.get_spread_statistics(self.short_spread_history)
+                
+                # Log short spread statistics to CSV if we have data
+                if short_stats['count'] > 0:
+                    recent_short_spread = self.short_spread_history[-1] if self.short_spread_history else 0.0
+                    
+                    self.data_logger.log_spread_stats_to_csv(
+                        spread=recent_short_spread,
+                        spread_type='short',
+                        moving_average=short_stats['moving_average'],
+                        rolling_std=short_stats['rolling_std'],
+                        count=short_stats['count'],
+                        min_spread=short_stats['min'],
+                        max_spread=short_stats['max']
+                    )
+                    
+                    self.logger.debug(
+                        f"📊 SHORT spread stats logged: count={short_stats['count']}, "
+                        f"MA={short_stats['moving_average']:.2f}, STD={short_stats['rolling_std']:.2f}")
+                else:
+                    self.logger.debug(f"⏳ Waiting for SHORT spread data (history size: {len(self.short_spread_history)})")
+                
+                await asyncio.sleep(self.threshold_update_interval)
+                
+                if self.stop_flag:
+                    break
+                
+                # Calculate dynamic thresholds using respective spread histories
+                new_long_threshold = self.calculate_dynamic_threshold(
+                    self.long_spread_history, float(self.min_long_grvt_threshold))
+                new_short_threshold = self.calculate_dynamic_threshold(
+                    self.short_spread_history, float(self.min_short_grvt_threshold))
+                
+                # Update thresholds if they changed significantly
+                if abs(new_long_threshold - float(self.long_grvt_threshold)) > 0.1:
+                    old_value = self.long_grvt_threshold
+                    self.long_grvt_threshold = Decimal(str(new_long_threshold))
+                    self.logger.info(
+                        f"📈 Dynamic LONG threshold updated: {old_value:.2f} → {new_long_threshold:.2f} "
+                        f"(samples: {len(self.long_spread_history)})")
+                
+                if abs(new_short_threshold - float(self.short_grvt_threshold)) > 0.1:
+                    old_value = self.short_grvt_threshold
+                    self.short_grvt_threshold = Decimal(str(new_short_threshold))
+                    self.logger.info(
+                        f"📉 Dynamic SHORT threshold updated: {old_value:.2f} → {new_short_threshold:.2f} "
+                        f"(samples: {len(self.short_spread_history)})")
+                
+            except asyncio.CancelledError:
+                self.logger.info("🔌 Threshold calculation coroutine cancelled")
+                break
+            except Exception as e:
+                if not self.stop_flag:
+                    self.logger.error(f"⚠️ Error in threshold calculation loop: {e}")
+                    self.logger.error(traceback.format_exc())
+                await asyncio.sleep(self.threshold_update_interval)
+
+    def start_threshold_calculation(self):
+        """Start the threshold calculation coroutine."""
+        if self.threshold_calculation_task is None or self.threshold_calculation_task.done():
+            self.threshold_calculation_task = asyncio.create_task(self._threshold_calculation_loop())
+            self.logger.info("✅ Threshold calculation coroutine started")
+
     def _handle_aster_order_filled(self, order_data: dict):
         """Handle Aster order fill."""
         try:
-            side = order_data.get("side", "")
+            side = order_data.get("side", "") 
             filled_amount = order_data.get("filled_base_amount", 0)
             avg_price = order_data.get("avg_filled_price", 0)
             
@@ -222,37 +456,7 @@ class GrvtArb:
             self.logger.error(f"Error handling GRVT order update: {e}")
             self.logger.error(f"Traceback: {traceback.format_exc()}")
 
-    async def send_pushover_alert(self, title: str, message: str, priority: int = 0):
-        """Send alert via Pushover.
-        
-        Args:
-            title: Alert title
-            message: Alert message
-            priority: Message priority (-2 to 2, default 0, 2 = emergency)
-        """
-        if not self.pushover_user_key or not self.pushover_api_token:
-            self.logger.warning("⚠️ Pushover credentials not configured, skipping alert")
-            return
 
-        try:
-            url = "https://api.pushover.net/1/messages.json"
-            data = {
-                "token": self.pushover_api_token,
-                "user": self.pushover_user_key,
-                "title": title,
-                "message": message,
-                "priority": priority
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=data) as response:
-                    if response.status == 200:
-                        self.logger.info(f"✅ Pushover alert sent: {title}")
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"❌ Failed to send Pushover alert: {response.status} - {error_text}")
-        except Exception as e:
-            self.logger.error(f"❌ Error sending Pushover alert: {e}")
 
     def shutdown(self, signum=None, frame=None):
         """Graceful shutdown handler."""
@@ -288,6 +492,17 @@ class GrvtArb:
             return
 
         self._cleanup_done = True
+
+        # Cancel threshold calculation task
+        if self.threshold_calculation_task and not self.threshold_calculation_task.done():
+            try:
+                self.threshold_calculation_task.cancel()
+                await asyncio.wait_for(self.threshold_calculation_task, timeout=2.0)
+                self.logger.info("🔌 Threshold calculation task cancelled")
+            except asyncio.TimeoutError:
+                self.logger.warning("⚠️ Timeout cancelling threshold calculation task")
+            except Exception as e:
+                self.logger.error(f"Error cancelling threshold calculation task: {e}")
 
         # Shutdown WebSocket manager
         try:
@@ -483,6 +698,7 @@ class GrvtArb:
                 
             self.position_tracker.grvt_position = await self.position_tracker.get_grvt_position()
             self.position_tracker.aster_position = await self.position_tracker.get_aster_position()
+            self.last_position_update = time.time()  # Initialize cache timestamp
             self.logger.info(
                 f"Initial positions - GRVT: {self.position_tracker.grvt_position}, "
                 f"Aster: {self.position_tracker.aster_position}")
@@ -490,9 +706,18 @@ class GrvtArb:
             self.logger.error(f"❌ Failed to get initial positions: {e}")
             return
 
+        # Start dynamic threshold calculation coroutine
+        self.start_threshold_calculation()
+        self.logger.info(
+            f"📊 Dynamic threshold enabled: z_score={self.z_score_multiplier}, "
+            f"min_samples={self.min_samples_for_dynamic}, "
+            f"min_long={self.min_long_grvt_threshold}, min_short={self.min_short_grvt_threshold}")
+
         # Main trading loop
         while not self.stop_flag:
             try:
+                # await asyncio.sleep(1)
+                
                 # Get BBO from order book manager (WebSocket data)
                 grvt_best_bid, grvt_best_ask = self.order_book_manager.get_grvt_bbo()
                 aster_best_bid, aster_best_ask = self.order_book_manager.get_aster_bbo()
@@ -511,21 +736,30 @@ class GrvtArb:
                 long_grvt = False
                 short_grvt = False
                 
+                # Update spread statistics for coroutine to use (no logging here)
+                if aster_best_bid and grvt_best_bid:
+                    long_spread = aster_best_bid - grvt_best_bid
+                    self.update_spread_statistics(long_spread=Decimal(str(long_spread)))
+                    
+                if grvt_best_ask and aster_best_ask:
+                    short_spread = grvt_best_ask - aster_best_ask
+                    self.update_spread_statistics(short_spread=Decimal(str(short_spread)))
+                                
+                # Check for trading signals (log to main log only when signal triggered)
                 if (aster_best_bid and grvt_best_bid and
                         aster_best_bid - grvt_best_bid > self.long_grvt_threshold):
                     long_grvt = True
-                    spread = aster_best_bid - grvt_best_bid
-                    self.logger.info(
-                        f"🟢 LONG GRVT Signal | Spread: {spread:.2f} | "
-                        f"Aster Bid: {aster_best_bid:.2f} | GRVT Bid: {grvt_best_bid:.2f} | "
+                    self.logger.debug(
+                        f"🟢 LONG GRVT Signal | "
+                        f"Aster Bid: {aster_best_bid:.6f} | GRVT Bid: {grvt_best_bid:.6f} | "
                         f"Threshold: {self.long_grvt_threshold}")
+                    
                 elif (grvt_best_ask and aster_best_ask and
                       grvt_best_ask - aster_best_ask > self.short_grvt_threshold):
                     short_grvt = True
-                    spread = grvt_best_ask - aster_best_ask
-                    self.logger.info(
-                        f"🔴 SHORT GRVT Signal | Spread: {spread:.2f} | "
-                        f"GRVT Ask: {grvt_best_ask:.2f} | Aster Ask: {aster_best_ask:.2f} | "
+                    self.logger.debug(
+                        f"🔴 SHORT GRVT Signal | "
+                        f"GRVT Ask: {grvt_best_ask:.6f} | Aster Ask: {aster_best_ask:.6f} | "
                         f"Threshold: {self.short_grvt_threshold}")
 
                 # Log BBO data (using WebSocket order book data)
@@ -540,17 +774,24 @@ class GrvtArb:
                     short_maker_threshold=self.short_grvt_threshold
                 )
 
-                if self.stop_flag:
-                    break
+                if long_grvt or short_grvt:
+                    # Update positions at the beginning of each loop iteration
+                    if not await self._update_positions():
+                        continue
+                    
+                    if self.stop_flag:
+                        break
 
                 # Execute trades
                 if self.position_tracker:
                     if (self.position_tracker.get_current_grvt_position() < self.max_position and
                             long_grvt):
                         await self._execute_long_trade()
+                        await asyncio.sleep(2)
                     elif (self.position_tracker.get_current_grvt_position() > -1 * self.max_position and
                           short_grvt):
                         await self._execute_short_trade()
+                        await asyncio.sleep(2)
                     else:
                         await asyncio.sleep(0.05)
                 else:
@@ -562,35 +803,55 @@ class GrvtArb:
                     self.logger.error(f"Traceback: {traceback.format_exc()}")
                     await asyncio.sleep(1)
 
-    async def _execute_long_trade(self):
-        """Execute a long trade (buy on GRVT, sell on Aster)."""
-        if self.stop_flag or not self.position_tracker:
-            return
-
-        # Update positions
+    async def _update_positions(self, force: bool = False) -> bool:
+        """Update positions from both exchanges.
+        
+        Args:
+            force: Force update even if cache is still valid
+        
+        Returns:
+            True if successful, False if failed or stop_flag is set.
+        """
+        current_time = time.time()
+        
+        # Check if cache is still valid (unless forced)
+        if not force and (current_time - self.last_position_update) < self.position_cache_interval:
+            self.logger.debug(
+                f"📊 Using cached positions (age: {current_time - self.last_position_update:.1f}s)")
+            return True
+        
         try:
             self.position_tracker.grvt_position = await asyncio.wait_for(
                 self.position_tracker.get_grvt_position(),
                 timeout=3.0
             )
             if self.stop_flag:
-                return
+                return False
             self.position_tracker.aster_position = await asyncio.wait_for(
                 self.position_tracker.get_aster_position(),
                 timeout=3.0
             )
+            
+            # Update cache timestamp
+            self.last_position_update = current_time
+            self.logger.debug(
+                f"📊 Positions updated from API - GRVT: {self.position_tracker.grvt_position}, "
+                f"Aster: {self.position_tracker.aster_position}")
+            return True
         except asyncio.TimeoutError:
             if self.stop_flag:
-                return
+                return False
             self.logger.warning("⚠️ Timeout getting positions")
-            return
+            return False
         except Exception as e:
             if self.stop_flag:
-                return
+                return False
             self.logger.error(f"⚠️ Error getting positions: {e}")
-            return
+            return False
 
-        if self.stop_flag:
+    async def _execute_long_trade(self):
+        """Execute a long trade (buy on GRVT, sell on Aster)."""
+        if self.stop_flag or not self.position_tracker:
             return
 
         self.logger.info(
@@ -611,7 +872,7 @@ class GrvtArb:
                 f"Threshold: {self.order_quantity * 2}\n\n"
                 f"Bot is shutting down."
             )
-            await self.send_pushover_alert(alert_title, alert_message, priority=2)
+            await self.pushover_bot.send_alert(alert_title, alert_message, priority=2)
             
             sys.exit(1)
 
@@ -652,32 +913,6 @@ class GrvtArb:
         if self.stop_flag or not self.position_tracker:
             return
 
-        # Update positions
-        try:
-            self.position_tracker.grvt_position = await asyncio.wait_for(
-                self.position_tracker.get_grvt_position(),
-                timeout=3.0
-            )
-            if self.stop_flag:
-                return
-            self.position_tracker.aster_position = await asyncio.wait_for(
-                self.position_tracker.get_aster_position(),
-                timeout=3.0
-            )
-        except asyncio.TimeoutError:
-            if self.stop_flag:
-                return
-            self.logger.warning("⚠️ Timeout getting positions")
-            return
-        except Exception as e:
-            if self.stop_flag:
-                return
-            self.logger.error(f"⚠️ Error getting positions: {e}")
-            return
-
-        if self.stop_flag:
-            return
-
         self.logger.info(
             f"GRVT position: {self.position_tracker.grvt_position} | "
             f"Aster position: {self.position_tracker.aster_position}")
@@ -696,7 +931,7 @@ class GrvtArb:
                 f"Threshold: {self.order_quantity * 2}\n\n"
                 f"Bot is shutting down."
             )
-            await self.send_pushover_alert(alert_title, alert_message, priority=2)
+            await self.pushover_bot.send_alert(alert_title, alert_message, priority=2)
             
             sys.exit(1)
 
