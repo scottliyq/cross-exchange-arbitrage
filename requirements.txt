@@ -3,9 +3,17 @@ pytz>=2025.2
 asyncio==4.0.0
 requests==2.32.5
 tenacity>=9.1.2
+pydantic==1.10.15  # nado-protocol requires pydantic v1
+supabase==2.3.4  # Not directly used - we use REST API to bypass JWT validation
+httpx[socks]>=0.24.0  # Required for SOCKS proxy support
+requests>=2.32.0  # Used for direct Supabase REST API calls
+nado-protocol>=0.2.8  # Nado exchange SDK
+setuptools>=80.0.0  # Required for eth-keyfile pkg_resources
+
+# CRITICAL: grvt-pysdk and nado-protocol have incompatible dependencies
+# - grvt-pysdk>=0.1.0 requires eth-account>=0.13.4 (for encode_typed_data)
+# - nado-protocol requires eth-account>=0.8.0,<0.9.0
+# SOLUTION: Use separate virtual environments for GRVT vs Nado bots
 
 # Forked edgeX official python sdk with post_only limit order
 git+https://github.com/your-quantguy/edgex-python-sdk.git@7ce85b6ebfa9df0a6f6252d93e10d106927257a9#egg=edgex-python-sdk
-
-# Lighter exchange SDK
-git+https://github.com/elliottech/lighter-python.git@d0009799970aad54ebb940aa3dc90cbc00028c54

@@ -1,15 +1,21 @@
 [project]
-name = "perp-dex-tools"
+name = "CROSS-EXCHANGE-ARBITRAGE"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "grvt-pysdk>=0.1.0",
-    "websockets>=12.0",
-    "requests>=2.31.0",
-    "pytz>=2024.1",
-    "tenacity>=8.2.3",
     "python-dotenv>=1.0.0",
-    "supabase>=2.0.0",
+    "pytz>=2025.2",
+    "asyncio==4.0.0",
+    "requests==2.32.5",
+    "tenacity>=9.1.2",
+    "pydantic==1.10.15",
+    "supabase==2.3.4",
+    "httpx[socks]>=0.24.0",
+    "websockets>=12.0",
 ]
+
+[tool.uv]
+# Use requirements.txt for complete dependency management due to git dependencies and version conflicts
+# Run: uv pip install -r requirements.txt

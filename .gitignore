@@ -214,3 +214,6 @@ logs/
 nohup.out
 uv.lock
 .DS_Store
+helpers/key_converter.py
+uv.lock
+.grvt_nado_env
